@@ -2,7 +2,7 @@ import os
 import pickle
 import warnings
 import numpy as np
-from FeaturesExtractor import FeaturesExtractor
+from hmmCode.FeaturesExtractor import FeaturesExtractor
 from hmmlearn import hmm
 
 
