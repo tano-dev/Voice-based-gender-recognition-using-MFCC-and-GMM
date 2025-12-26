@@ -70,9 +70,9 @@ class ModelsTrainer:
         female_voice_features = self.collect_features(females)
         male_voice_features   = self.collect_features(males)
         # generate gaussian mixture models
-        females_gmm = hmm.GaussianHMM(n_components=3)
-        males_gmm   = hmm.GaussianHMM(n_components=3)
-        ubm         = hmm.GaussianHMM(n_components=3)
+        females_gmm = hmm.GaussianHMM(n_components=5)
+        males_gmm   = hmm.GaussianHMM(n_components=5)
+        ubm         = hmm.GaussianHMM(n_components=5)
         # fit features to models
         females_gmm.fit(female_voice_features)
         males_gmm.fit(male_voice_features)
