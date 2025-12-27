@@ -73,20 +73,38 @@ class ModelsTrainer:
         for file in files:
             print("%10s %8s %1s" % ("--> TESTING", ":", os.path.basename(file)))
             print(features["female"].shape, features["male"].shape)
+            
+            # Determine gender robustly by checking the path string
+            # This works for both "females" and "female" folder names
+            if "female" in file.lower():
+                gender = "female"
+            elif "male" in file.lower():
+                gender = "male"
+            else:
+                print("Error: Could not determine gender from file path.")
+                continue
+
             # extract MFCC & delta MFCC features from audio
             try: 
-                # vector = self.features_extractor.extract_features(file.split('.')[0] + "_without_silence.wav")
+                # Note: You are processing the raw file. If you wanted the 
+                # silence-removed version, you need to call ffmpeg_silence_eliminator here.
                 vector  = self.features_extractor.extract_features(file)
+                
                 spk_gmm = hmm.GaussianHMM(n_components=16)      
                 spk_gmm.fit(vector)
                 spk_vec = spk_gmm.means_
-                gender  = file.split("/")[1][:-1]
-                print(gender)
+                
+                print(f"Detected Gender Label: {gender}")
+
                 # stack super vectors
-                if features[gender].size == 0:  features[gender] = spk_vec
-                else                         :  features[gender] = np.vstack((features[gender], spk_vec))
+                if features[gender].size == 0:  
+                    features[gender] = spk_vec
+                else:                           
+                    features[gender] = np.vstack((features[gender], spk_vec))
             
-            except:
+            except Exception as e:
+                # Print the actual error so you can debug it
+                print(f"Processing Error: {e}")
                 pass
         
         # save models
@@ -135,7 +153,7 @@ class ModelsTrainer:
         """
         import os
         path     = os.path.dirname(__file__)
-        filename = path + "/" + name + ".hmm"
+        filename = path + "/" + name + ".svm"
         with open(filename, 'wb') as gmm_file:
             pickle.dump(gmm, gmm_file)
         print ("%5s %10s" % ("SAVING", filename,))

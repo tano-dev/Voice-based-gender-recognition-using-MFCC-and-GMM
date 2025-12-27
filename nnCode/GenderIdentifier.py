@@ -71,7 +71,7 @@ class GenderIdentifier:
                 vector = vector[::5]
 
                 # Fit a temporary GMM to this single file to get its "Supervectors"
-                spk_gmm = hmm.GaussianHMM(n_components=16, covariance_type='diag', n_iter=10)
+                spk_gmm = hmm.GaussianHMM(n_components=16, covariance_type='diag', n_iter=20)
                 spk_gmm.fit(vector)
                 
                 # Get the means of this file
