@@ -101,6 +101,7 @@ class GenderIdentifier:
         accuracy     = ( float(self.total_sample - self.error) / float(self.total_sample) ) * 100
         accuracy_msg = "*** Accuracy = " + str(round(accuracy, 3)) + "% ***"
         print(accuracy_msg)  
+        self.process_plot()
         
 
 
@@ -124,6 +125,19 @@ class GenderIdentifier:
         if is_male_log_likelihood > is_female_log_likelihood: winner = "male"
         else                                                : winner = "female"
         return winner
+    
+    def process_plot(self):
+        import matplotlib.pyplot as plt
+        
+        # Plot
+        plt.figure(figsize=(8, 6))
+        accuracy     = ( float(self.total_sample - self.error) / float(self.total_sample) ) * 100
+        plt.bar(['Correct', 'Incorrect'], [self.total_sample - self.error, self.error], color=['green', 'red'])
+        plt.title(f'Gender Identification Accuracy: {round(accuracy, 2)}%')
+        plt.xlabel('Outcome')
+        plt.ylabel('Number of Samples')
+        plt.show()
+        
 
 
 if __name__== "__main__":
