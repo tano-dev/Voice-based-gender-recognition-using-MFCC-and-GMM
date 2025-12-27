@@ -59,6 +59,9 @@ class GenderIdentifier:
             accuracy     = ( float(self.total_sample - self.error) / float(self.total_sample) ) * 100
             accuracy_msg = "*** Accuracy = " + str(round(accuracy, 3)) + "% ***"
             print(accuracy_msg)
+            # plot training data
+            self.print_statistics()
+            self.process_plot()
         else:
             print("No samples processed.")
 
@@ -85,6 +88,28 @@ class GenderIdentifier:
         else:                                 
             winner = "female"
         return winner
+    
+    def print_statistics(self):
+        if self.total_sample > 0:
+            accuracy     = ( float(self.total_sample - self.error) / float(self.total_sample) ) * 100
+            accuracy_msg = "*** Accuracy = " + str(round(accuracy, 3)) + "% ***"
+            print(accuracy_msg)
+            
+            print(f"Total samples processed: {self.total_sample}")
+            print(f"Total errors: {self.error}")
+            
+    def process_plot(self):
+        import matplotlib.pyplot as plt
+        if self.total_sample > 0:
+            accuracy     = ( float(self.total_sample - self.error) / float(self.total_sample) ) * 100
+            plt.figure(figsize=(6,4))
+            plt.bar(['Correct', 'Incorrect'], [self.total_sample - self.error, self.error], color=['green', 'red'])
+            plt.title(f'Gender Identification Accuracy: {round(accuracy, 2)}%')
+            plt.ylabel('Number of Samples')
+            plt.show()
+            
+            
+        
 
 if __name__== "__main__":
     # Ensure paths exist before running
