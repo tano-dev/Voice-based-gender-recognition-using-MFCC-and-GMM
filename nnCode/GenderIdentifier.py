@@ -2,17 +2,14 @@ import os
 import pickle
 import warnings
 import numpy as np
-from FeaturesExtractor import FeaturesExtractor
+import librosa
+import soundfile as sf
+import tensorflow.keras as keras
+from sklearn.preprocessing import StandardScaler # <--- QUAN TRỌNG: Để chuẩn hóa dữ liệu
+from nnCode.FeaturesExtractor import FeaturesExtractor
 from hmmlearn import hmm
 
 warnings.filterwarnings("ignore")
-import subprocess
-import speech_recognition as sr
-from pydub import AudioSegment
-from subprocess import Popen, PIPE
-from pydub.silence import split_on_silence, detect_nonsilent
-
-import keras
 
 class GenderIdentifier:
 
@@ -22,128 +19,113 @@ class GenderIdentifier:
         self.error                 = 0
         self.total_sample          = 0
         self.features_extractor    = FeaturesExtractor()
-        # load models
+        
+        # 1. Load dữ liệu "Super Vectors" từ file .nn
+        print("Loading models...")
         self.females_gmm = pickle.load(open(females_model_path, 'rb'))
         self.males_gmm   = pickle.load(open(males_model_path, 'rb'))
         
-        # svm
+        # 2. Chuẩn bị dữ liệu Train
+        # Class 0 = Female, Class 1 = Male
         self.X_train = np.vstack((self.females_gmm, self.males_gmm))
-        self.y_train = np.hstack(( 0 * np.ones(self.females_gmm.shape[0]), np.ones(self.males_gmm.shape[0])))
-        print(self.X_train.shape, self.y_train.shape)
-        # define the keras model
+        self.y_train = np.hstack((np.zeros(self.females_gmm.shape[0]), 
+                                  np.ones(self.males_gmm.shape[0])))
+        
+        print(f"Data Shape: {self.X_train.shape}")
+
+        # 3. Chuẩn hóa dữ liệu (StandardScaler) - QUAN TRỌNG ĐỂ TRÁNH BIAS
+        self.scaler = StandardScaler()
+        self.X_train = self.scaler.fit_transform(self.X_train)
+        
+        # 4. Thiết kế mạng Neural (Tăng số neuron và đổi sang Softmax)
         self.model = keras.Sequential()
-        self.model.add(keras.layers.Dense(39, input_dim=39, activation='relu'))
-        self.model.add(keras.layers.Dense(13, activation='relu'))
-        self.model.add(keras.layers.Dense( 2, activation='sigmoid'))
+        self.model.add(keras.layers.Dense(64, input_dim=39, activation='relu')) 
+        self.model.add(keras.layers.Dense(32, activation='relu'))
+        self.model.add(keras.layers.Dense(2, activation='softmax')) # Softmax tốt hơn cho phân loại
         
-        self.model.compile(optimizer = 'adam',
-                           loss      = 'binary_crossentropy',
-                           metrics   = ['accuracy'])
-        self.model.fit(self.X_train, keras.utils.to_categorical(self.y_train), epochs = 5)
+        self.model.compile(optimizer='adam',
+                           loss='sparse_categorical_crossentropy',
+                           metrics=['accuracy'])
         
+        # 5. Train model (Tăng epochs lên 50)
+        print("Training Neural Network...")
+        self.model.fit(self.X_train, self.y_train, epochs=50, batch_size=16, verbose=1)
+
     def ffmpeg_silence_eliminator(self, input_path, output_path):
-        """
-        Eliminate silence from voice file using ffmpeg library.
-        Args:
-            input_path  (str) : Path to get the original voice file from.
-            output_path (str) : Path to save the processed file to.
-        Returns:
-            (list)  : List including True for successful authentication, False otherwise and a percentage value
-                      representing the certainty of the decision.
-        """
-        # filter silence in mp3 file
-        filter_command = ["ffmpeg", "-i", input_path, "-af", "silenceremove=1:0:0.05:-1:1:-36dB", "-ac", "1", "-ss", "0","-t","90", output_path, "-y"]
-        out = subprocess.Popen(filter_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        out.wait()
-        
-        with_silence_duration = os.popen("ffprobe -i '" + input_path + "' -show_format -v quiet | sed -n 's/duration=//p'").read()
-        no_silence_duration   = os.popen("ffprobe -i '" + output_path + "' -show_format -v quiet | sed -n 's/duration=//p'").read()
-        
-        # print duration specs
+        """ Loại bỏ khoảng lặng dùng Librosa (Không cần ffmpeg.exe) """
         try:
-            print("%-32s %-7s %-50s" % ("ORIGINAL SAMPLE DURATION",         ":", float(with_silence_duration)))
-            print("%-23s %-7s %-50s" % ("SILENCE FILTERED SAMPLE DURATION", ":", float(no_silence_duration)))
-        except:
-            print("WaveHandlerError: Cannot convert float to string", with_silence_duration, no_silence_duration)
-    
-        # convert file to wave and read array
-        load_command = ["ffmpeg", "-i", output_path, "-f", "wav", "-" ]
-        p            = Popen(load_command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        data         = p.communicate()[0]
-        audio_np     = np.frombuffer(data[data.find(b'\x00data')+ 9:], np.int16)
-        
-        # delete temp silence free file, as we only need the array
-        #os.remove(output_path)
-        return audio_np, no_silence_duration
-    
-        
-        
+            y, sr = librosa.load(input_path, sr=None)
+            y_trimmed, _ = librosa.effects.trim(y, top_db=36)
+            sf.write(output_path, y_trimmed, sr, subtype='PCM_16')
+            return True
+        except Exception as e:
+            print(f"Silence removal error: {e}")
+            return False
+
     def process(self):
-        files = self.get_file_paths(self.females_training_path, self.males_training_path)
-        # read the test directory and get the list of test audio files
+        # Lấy danh sách file
+        females = [os.path.join(self.females_training_path, f) for f in os.listdir(self.females_training_path)]
+        males   = [os.path.join(self.males_training_path, f) for f in os.listdir(self.males_training_path)]
+        files   = females + males
+
         for file in files:
             self.total_sample += 1
             print("%10s %8s %1s" % ("--> TESTING", ":", os.path.basename(file)))
 
-            #self.ffmpeg_silence_eliminator(file, file.split('.')[0] + "_without_silence.wav")
+            # 1. Xử lý khoảng lặng (BẮT BUỘC vì model được train trên dữ liệu sạch)
+            temp_path = file.split('.')[0] + "_temp.wav"
+            self.ffmpeg_silence_eliminator(file, temp_path)
 
-            # extract MFCC & delta MFCC features from audio
-            try: 
-                # vector = self.features_extractor.extract_features(file.split('.')[0] + "_without_silence.wav")
-                vector = self.features_extractor.extract_features(file)
+            try:
+                # 2. Trích xuất đặc trưng từ file sạch
+                vector = self.features_extractor.extract_features(temp_path)
+                
+                # 3. Tạo GMM tạm thời để lấy Super Vector (Means)
                 spk_gmm = hmm.GaussianHMM(n_components=16)      
                 spk_gmm.fit(vector)
-                self.spk_vec = spk_gmm.means_
-                print(self.spk_vec.shape)
-                prediction = list(self.model.predict_classes(self.spk_vec))
-                print(prediction)
-                if prediction.count(0) <= prediction.count(1) : sc = 1
-                else                                          : sc = 0
+                spk_vec = spk_gmm.means_ # Shape (16, 39)
                 
-                genders = {0: "female", 1: "male"}
-                winner = genders[sc]
-                expected_gender = file.split("/")[1][:-1]
-                print(expected_gender)
+                # 4. CHUẨN HÓA vector test theo scaler đã học từ tập train
+                spk_vec_scaled = self.scaler.transform(spk_vec)
+
+                # 5. Dự đoán
+                # Thay predict_classes (đã cũ) bằng argmax
+                predictions = self.model.predict(spk_vec_scaled) 
+                predicted_classes = np.argmax(predictions, axis=1) # [0, 1, 1, 0...]
                 
-                print("%10s %6s %1s" % ("+ EXPECTATION",":", expected_gender))
-                print("%10s %3s %1s" %  ("+ IDENTIFICATION", ":", winner))
-    
-                if winner != expected_gender: self.error += 1
+                # Đếm phiếu bầu (Majority Voting)
+                votes_female = np.sum(predicted_classes == 0)
+                votes_male   = np.sum(predicted_classes == 1)
+                
+                if votes_male > votes_female: winner = "male"
+                else:                         winner = "female"
+                
+                # 6. Lấy nhãn đúng (Fix lỗi Windows Path)
+                folder_name = os.path.basename(os.path.dirname(file))
+                expected_gender = folder_name[:-1] # 'females' -> 'female'
+
+                print(f"+ EXPECTATION  : {expected_gender}")
+                print(f"+ IDENTIFICATION : {winner} (Votes: M={votes_male}, F={votes_female})")
+
+                if winner != expected_gender:
+                    self.error += 1
                 print("----------------------------------------------------")
-    
 
-            except : print("Error")
-            # os.remove(file.split('.')[0] + "_without_silence.wav")
+            except Exception as e:
+                print(f"Error processing {file}: {e}")
             
-            
-        accuracy     = ( float(self.total_sample - self.error) / float(self.total_sample) ) * 100
-        accuracy_msg = "*** Accuracy = " + str(round(accuracy, 3)) + "% ***"
-        print(accuracy_msg)  
-        
+            # Xóa file tạm
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
-
-    def get_file_paths(self, females_training_path, males_training_path):
-        # get file paths
-        females = [ os.path.join(females_training_path, f) for f in os.listdir(females_training_path) ]
-        males   = [ os.path.join(males_training_path, f) for f in os.listdir(males_training_path) ]
-        files   = females + males
-        return files
-
-    def identify_gender(self, vector):
-        ubm_score = self.ubm.score(vector)
-        # female hypothesis scoring
-        is_female_log_likelihood = self.females_gmm.score(vector) / ubm_score
-        # male hypothesis scoring
-        is_male_log_likelihood = self.males_gmm.score(vector) / ubm_score
-
-        print("%10s %5s %1s" % ("+ FEMALE SCORE",":", str(round(is_female_log_likelihood, 3))))
-        print("%10s %7s %1s" % ("+ MALE SCORE", ":", str(round(is_male_log_likelihood,3))))
-
-        if is_male_log_likelihood > is_female_log_likelihood: winner = "male"
-        else                                                : winner = "female"
-        return winner
-
+        # Tính độ chính xác cuối cùng
+        if self.total_sample > 0:
+            accuracy = ((self.total_sample - self.error) / float(self.total_sample)) * 100
+        else:
+            accuracy = 0
+        print(f"*** Accuracy = {accuracy:.3f}% ***")
 
 if __name__== "__main__":
-    gender_identifier = GenderIdentifier("TestingData/females", "TestingData/males", "females.hmm", "males.hmm")
+    # Đảm bảo đường dẫn file .nn đúng
+    gender_identifier = GenderIdentifier("TestingData/females", "TestingData/males", "females.nn", "males.nn")
     gender_identifier.process()
