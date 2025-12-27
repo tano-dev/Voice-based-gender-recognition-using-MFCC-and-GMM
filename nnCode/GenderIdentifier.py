@@ -61,21 +61,27 @@ class GenderIdentifier:
         for file in files:
             self.total_sample += 1
             filename = os.path.basename(file)
-            print("%10s %8s %1s" % ("--> TESTING", ":", filename))
+            # print("%10s %8s %1s" % ("--> TESTING", ":", filename))
 
             try: 
                 # Extract features from audio
                 vector = self.features_extractor.extract_features(file)
                 
                 # OPTIMIZATION: Downsample to speed up GMM fitting
-                vector = vector[::5]
+                # vector = vector[::5]
 
                 # Fit a temporary GMM to this single file to get its "Supervectors"
-                spk_gmm = hmm.GaussianHMM(n_components=16, covariance_type='diag', n_iter=20)
+                spk_gmm = hmm.GaussianHMM(
+                    n_components=16, 
+                    covariance_type='diag', 
+                    n_iter=20,
+                    min_covar=0.01  # Stability fix
+                )
+                
                 spk_gmm.fit(vector)
                 
                 # Get the means of this file
-                spk_vec = spk_gmm.means_ # Shape (16, 39)
+                spk_vec = spk_gmm.means_
                 
                 # Predict gender for EACH of the 16 components
                 # Note: predict_classes is removed in newer Keras, using argmax instead
@@ -101,14 +107,14 @@ class GenderIdentifier:
                 else:
                     expected_gender = "unknown"
                 
-                print("%10s %6s %1s" % ("+ EXPECTATION",":", expected_gender))
-                print("%10s %3s %1s" %  ("+ IDENTIFICATION", ":", winner))
-                print(f"   Votes -> Female: {female_votes} | Male: {male_votes}")
+                # print("%10s %6s %1s" % ("+ EXPECTATION",":", expected_gender))
+                # print("%10s %3s %1s" %  ("+ IDENTIFICATION", ":", winner))
+                # print(f"   Votes -> Female: {female_votes} | Male: {male_votes}")
     
                 if winner != expected_gender: 
                     self.error += 1
-                print("----------------------------------------------------")
-    
+                # print("----------------------------------------------------")
+                
             except Exception as e:
                 print(f"Error processing {filename}: {e}")
             
@@ -117,12 +123,28 @@ class GenderIdentifier:
             accuracy     = (float(self.total_sample - self.error) / float(self.total_sample)) * 100
             accuracy_msg = "*** Accuracy = " + str(round(accuracy, 3)) + "% ***"
             print(accuracy_msg)
+            self.process_plot()
 
     def get_file_paths(self, females_training_path, males_training_path):
         females = [os.path.join(females_training_path, f) for f in os.listdir(females_training_path) if f.endswith(".wav")]
         males   = [os.path.join(males_training_path, f) for f in os.listdir(males_training_path) if f.endswith(".wav")]
         return females + males
 
+    def process_plot(self):
+        import matplotlib.pyplot as plt
+        
+        # Plot training data 
+        if self.total_sample > 0:
+            accuracy     = ( float(self.total_sample - self.error) / float(self.total_sample) ) * 100
+            accuracy_msg = "*** Accuracy = " + str(round(accuracy, 3)) + "% ***"
+            print(accuracy_msg)
+            plt.figure(figsize=(6,4))
+            plt.bar(['Correct', 'Incorrect'], [self.total_sample - self.error, self.error], color=['green', 'red'])
+            plt.title('Gender Identification Accuracy: ' + str(round(accuracy, 2)) + '%')
+            plt.xlabel('Outcome')
+            plt.ylabel('Number of Samples')
+            plt.show()
+            
 if __name__== "__main__":
     # Ensure these point to the .hmm files you saved with ModelsTrainer
     gender_identifier = GenderIdentifier(
