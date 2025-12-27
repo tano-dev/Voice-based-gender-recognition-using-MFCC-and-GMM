@@ -2,12 +2,10 @@ import os
 import pickle
 import warnings
 import numpy as np
-import librosa
-import soundfile as sf
-import tensorflow.keras as keras
-from sklearn.preprocessing import StandardScaler # <--- QUAN TRỌNG: Để chuẩn hóa dữ liệu
-from nnCode.FeaturesExtractor import FeaturesExtractor
 from hmmlearn import hmm
+from nnCode.FeaturesExtractor import FeaturesExtractor
+import tensorflow as tf # Replaces generic keras import for better compatibility
+from tensorflow import keras
 
 warnings.filterwarnings("ignore")
 
@@ -20,112 +18,117 @@ class GenderIdentifier:
         self.total_sample          = 0
         self.features_extractor    = FeaturesExtractor()
         
-        # 1. Load dữ liệu "Super Vectors" từ file .nn
-        print("Loading models...")
+        # 1. LOAD MODELS
+        print("Loading GMM models...")
         self.females_gmm = pickle.load(open(females_model_path, 'rb'))
         self.males_gmm   = pickle.load(open(males_model_path, 'rb'))
         
-        # 2. Chuẩn bị dữ liệu Train
-        # Class 0 = Female, Class 1 = Male
-        self.X_train = np.vstack((self.females_gmm, self.males_gmm))
-        self.y_train = np.hstack((np.zeros(self.females_gmm.shape[0]), 
-                                  np.ones(self.males_gmm.shape[0])))
+        # 2. PREPARE DATA FOR NEURAL NETWORK
+        # The Neural Network cannot read the GMM object directly. 
+        # We must extract the 'means_' (the 16 vectors representing the voice).
         
-        print(f"Data Shape: {self.X_train.shape}")
-
-        # 3. Chuẩn hóa dữ liệu (StandardScaler) - QUAN TRỌNG ĐỂ TRÁNH BIAS
-        self.scaler = StandardScaler()
-        self.X_train = self.scaler.fit_transform(self.X_train)
+        # Shape of means_: (16, 39) -> 16 components, 39 features each
+        female_vectors = self.females_gmm.means_
+        male_vectors   = self.males_gmm.means_
         
-        # 4. Thiết kế mạng Neural (Tăng số neuron và đổi sang Softmax)
+        # Stack them to create training data
+        self.X_train = np.vstack((female_vectors, male_vectors))
+        
+        # Create labels: 0 for Female, 1 for Male
+        # We have 16 female vectors and 16 male vectors
+        self.y_train = np.hstack((np.zeros(len(female_vectors)), np.ones(len(male_vectors))))
+        
+        print(f"NN Training Data Shape: {self.X_train.shape}") # Should be (32, 39)
+        
+        # 3. DEFINE & TRAIN KERAS MODEL
+        # We train the NN to classify these specific vectors
+        print("Training Neural Network...")
         self.model = keras.Sequential()
-        self.model.add(keras.layers.Dense(64, input_dim=39, activation='relu')) 
-        self.model.add(keras.layers.Dense(32, activation='relu'))
-        self.model.add(keras.layers.Dense(2, activation='softmax')) # Softmax tốt hơn cho phân loại
+        self.model.add(keras.layers.Dense(39, input_dim=39, activation='relu'))
+        self.model.add(keras.layers.Dense(13, activation='relu'))
+        self.model.add(keras.layers.Dense(2, activation='softmax')) # Softmax is better for categorical
         
         self.model.compile(optimizer='adam',
-                           loss='sparse_categorical_crossentropy',
+                           loss='sparse_categorical_crossentropy', # Matches integer labels (0, 1)
                            metrics=['accuracy'])
-        
-        # 5. Train model (Tăng epochs lên 50)
-        print("Training Neural Network...")
-        self.model.fit(self.X_train, self.y_train, epochs=50, batch_size=16, verbose=1)
-
-    def ffmpeg_silence_eliminator(self, input_path, output_path):
-        """ Loại bỏ khoảng lặng dùng Librosa (Không cần ffmpeg.exe) """
-        try:
-            y, sr = librosa.load(input_path, sr=None)
-            y_trimmed, _ = librosa.effects.trim(y, top_db=36)
-            sf.write(output_path, y_trimmed, sr, subtype='PCM_16')
-            return True
-        except Exception as e:
-            print(f"Silence removal error: {e}")
-            return False
+                           
+        self.model.fit(self.X_train, self.y_train, epochs=50, verbose=0)
+        print("Neural Network trained successfully.")
 
     def process(self):
-        # Lấy danh sách file
-        females = [os.path.join(self.females_training_path, f) for f in os.listdir(self.females_training_path)]
-        males   = [os.path.join(self.males_training_path, f) for f in os.listdir(self.males_training_path)]
-        files   = females + males
-
+        files = self.get_file_paths(self.females_training_path, self.males_training_path)
+        
         for file in files:
             self.total_sample += 1
-            print("%10s %8s %1s" % ("--> TESTING", ":", os.path.basename(file)))
+            filename = os.path.basename(file)
+            print("%10s %8s %1s" % ("--> TESTING", ":", filename))
 
-            # 1. Xử lý khoảng lặng (BẮT BUỘC vì model được train trên dữ liệu sạch)
-            temp_path = file.split('.')[0] + "_temp.wav"
-            self.ffmpeg_silence_eliminator(file, temp_path)
-
-            try:
-                # 2. Trích xuất đặc trưng từ file sạch
-                vector = self.features_extractor.extract_features(temp_path)
+            try: 
+                # Extract features from audio
+                vector = self.features_extractor.extract_features(file)
                 
-                # 3. Tạo GMM tạm thời để lấy Super Vector (Means)
-                spk_gmm = hmm.GaussianHMM(n_components=16)      
+                # OPTIMIZATION: Downsample to speed up GMM fitting
+                vector = vector[::5]
+
+                # Fit a temporary GMM to this single file to get its "Supervectors"
+                spk_gmm = hmm.GaussianHMM(n_components=16, covariance_type='diag', n_iter=10)
                 spk_gmm.fit(vector)
+                
+                # Get the means of this file
                 spk_vec = spk_gmm.means_ # Shape (16, 39)
                 
-                # 4. CHUẨN HÓA vector test theo scaler đã học từ tập train
-                spk_vec_scaled = self.scaler.transform(spk_vec)
-
-                # 5. Dự đoán
-                # Thay predict_classes (đã cũ) bằng argmax
-                predictions = self.model.predict(spk_vec_scaled) 
-                predicted_classes = np.argmax(predictions, axis=1) # [0, 1, 1, 0...]
+                # Predict gender for EACH of the 16 components
+                # Note: predict_classes is removed in newer Keras, using argmax instead
+                predictions = np.argmax(self.model.predict(spk_vec, verbose=0), axis=-1)
                 
-                # Đếm phiếu bầu (Majority Voting)
-                votes_female = np.sum(predicted_classes == 0)
-                votes_male   = np.sum(predicted_classes == 1)
+                # COUNT VOTES
+                # 0 = Female, 1 = Male
+                female_votes = np.sum(predictions == 0)
+                male_votes   = np.sum(predictions == 1)
                 
-                if votes_male > votes_female: winner = "male"
-                else:                         winner = "female"
+                if male_votes > female_votes:
+                    sc = 1
+                    winner = "male"
+                else:
+                    sc = 0
+                    winner = "female"
                 
-                # 6. Lấy nhãn đúng (Fix lỗi Windows Path)
-                folder_name = os.path.basename(os.path.dirname(file))
-                expected_gender = folder_name[:-1] # 'females' -> 'female'
-
-                print(f"+ EXPECTATION  : {expected_gender}")
-                print(f"+ IDENTIFICATION : {winner} (Votes: M={votes_male}, F={votes_female})")
-
-                if winner != expected_gender:
+                # Check Expectation (Robust Logic for Windows Paths)
+                if "female" in file.lower():
+                    expected_gender = "female"
+                elif "male" in file.lower():
+                    expected_gender = "male"
+                else:
+                    expected_gender = "unknown"
+                
+                print("%10s %6s %1s" % ("+ EXPECTATION",":", expected_gender))
+                print("%10s %3s %1s" %  ("+ IDENTIFICATION", ":", winner))
+                print(f"   Votes -> Female: {female_votes} | Male: {male_votes}")
+    
+                if winner != expected_gender: 
                     self.error += 1
                 print("----------------------------------------------------")
-
+    
             except Exception as e:
-                print(f"Error processing {file}: {e}")
+                print(f"Error processing {filename}: {e}")
             
-            # Xóa file tạm
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-
-        # Tính độ chính xác cuối cùng
+        # Final Accuracy
         if self.total_sample > 0:
-            accuracy = ((self.total_sample - self.error) / float(self.total_sample)) * 100
-        else:
-            accuracy = 0
-        print(f"*** Accuracy = {accuracy:.3f}% ***")
+            accuracy     = (float(self.total_sample - self.error) / float(self.total_sample)) * 100
+            accuracy_msg = "*** Accuracy = " + str(round(accuracy, 3)) + "% ***"
+            print(accuracy_msg)
+
+    def get_file_paths(self, females_training_path, males_training_path):
+        females = [os.path.join(females_training_path, f) for f in os.listdir(females_training_path) if f.endswith(".wav")]
+        males   = [os.path.join(males_training_path, f) for f in os.listdir(males_training_path) if f.endswith(".wav")]
+        return females + males
 
 if __name__== "__main__":
-    # Đảm bảo đường dẫn file .nn đúng
-    gender_identifier = GenderIdentifier("TestingData/females", "TestingData/males", "females.nn", "males.nn")
+    # Ensure these point to the .hmm files you saved with ModelsTrainer
+    gender_identifier = GenderIdentifier(
+        "TestingData/females", 
+        "TestingData/males", 
+        "models/females.hmm", 
+        "models/males.hmm"
+    )
     gender_identifier.process()

@@ -2,145 +2,94 @@ import os
 import pickle
 import warnings
 import numpy as np
-from FeaturesExtractor import FeaturesExtractor
 from hmmlearn import hmm
-
-
-import pydub
-import subprocess
-import speech_recognition as sr
-from pydub import AudioSegment
-from subprocess import Popen, PIPE
-from pydub.silence import split_on_silence, detect_nonsilent
+from nnCode.FeaturesExtractor import FeaturesExtractor 
 
 warnings.filterwarnings("ignore")
 
-
 class ModelsTrainer:
-
     def __init__(self, females_files_path, males_files_path):
         self.females_training_path = females_files_path
         self.males_training_path   = males_files_path
         self.features_extractor    = FeaturesExtractor()
 
-
-    def ffmpeg_silence_eliminator(self, input_path, output_path):
-        """
-        Eliminate silence from voice file using ffmpeg library.
-        Args:
-            input_path  (str) : Path to get the original voice file from.
-            output_path (str) : Path to save the processed file to.
-        Returns:
-            (list)  : List including True for successful authentication, False otherwise and a percentage value
-                      representing the certainty of the decision.
-        """
-        # filter silence in mp3 file
-        filter_command = ["ffmpeg", "-i", input_path, "-af", "silenceremove=1:0:0.05:-1:1:-36dB", "-ac", "1", "-ss", "0","-t","90", output_path, "-y"]
-        out = subprocess.Popen(filter_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        out.wait()
-        
-        with_silence_duration = os.popen("ffprobe -i '" + input_path + "' -show_format -v quiet | sed -n 's/duration=//p'").read()
-        no_silence_duration   = os.popen("ffprobe -i '" + output_path + "' -show_format -v quiet | sed -n 's/duration=//p'").read()
-        
-        # print duration specs
-        try:
-            print("%-32s %-7s %-50s" % ("ORIGINAL SAMPLE DURATION",         ":", float(with_silence_duration)))
-            print("%-23s %-7s %-50s" % ("SILENCE FILTERED SAMPLE DURATION", ":", float(no_silence_duration)))
-        except:
-            print("WaveHandlerError: Cannot convert float to string", with_silence_duration, no_silence_duration)
-    
-        # convert file to wave and read array
-        load_command = ["ffmpeg", "-i", output_path, "-f", "wav", "-" ]
-        p            = Popen(load_command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        data         = p.communicate()[0]
-        audio_np     = np.frombuffer(data[data.find(b'\x00data')+ 9:], np.int16)
-        
-        # delete temp silence free file, as we only need the array
-        #os.remove(output_path)
-        return audio_np, no_silence_duration
-    
-
-
-
-
-    def process(self):
-        females, males = self.get_file_paths(self.females_training_path,
-                                             self.males_training_path)
-        files = females + males
-        # collect voice features
-        features = {"female" : np.asarray(()), "male" : np.asarray(())}
-        
-        for file in files:
-            print("%10s %8s %1s" % ("--> TESTING", ":", os.path.basename(file)))
-            print(features["female"].shape, features["male"].shape)
-            # extract MFCC & delta MFCC features from audio
-            try: 
-                # vector = self.features_extractor.extract_features(file.split('.')[0] + "_without_silence.wav")
-                vector  = self.features_extractor.extract_features(file)
-                spk_gmm = hmm.GaussianHMM(n_components=16)      
-                spk_gmm.fit(vector)
-                spk_vec = spk_gmm.means_
-                gender  = file.split("/")[1][:-1]
-                print(gender)
-                # stack super vectors
-                if features[gender].size == 0:  features[gender] = spk_vec
-                else                         :  features[gender] = np.vstack((features[gender], spk_vec))
-            
-            except:
-                pass
-        
-        # save models
-        self.save_gmm(features["female"], "females")
-        self.save_gmm(features["male"],   "males")
-
-
     def get_file_paths(self, females_training_path, males_training_path):
-        # get file paths
-        females = [ os.path.join(females_training_path, f) for f in os.listdir(females_training_path) ]
-        males   = [ os.path.join(males_training_path, f) for f in os.listdir(males_training_path) ]
+        # Join paths safely for any OS
+        females = [os.path.join(females_training_path, f) for f in os.listdir(females_training_path) if f.endswith('.wav')]
+        males   = [os.path.join(males_training_path, f) for f in os.listdir(males_training_path) if f.endswith('.wav')]
         return females, males
 
-    def collect_features(self, files):
+    def train_model_for_class(self, files, label_name):
         """
-        	Collect voice features from various speakers of the same gender.
-    
-        	Args:
-        	    files (list) : List of voice file paths.
-    
-        	Returns:
-        	    (array) : Extracted features matrix.
-        	"""
-        features = np.asarray(())
-        # extract features for each speaker
-        for file in files:
-            print("%5s %10s" % ("PROCESSNG ", file))
-            self.ffmpeg_silence_eliminator(file, file.split('.')[0] + "_without_silence.wav")
+        Extracts features from ALL files in a list and trains ONE GMM for that class.
+        Includes optimization (downsampling) to prevent 'running forever'.
+        """
+        all_features = np.asarray(())
         
-            # extract MFCC & delta MFCC features from audio
-            try: 
-                vector    = self.features_extractor.extract_features(file.split('.')[0] + "_without_silence.wav")
-                # stack the features
-                if features.size == 0:  features = vector
-                else:                   features = np.vstack((features, vector))           
-            except : pass
-            os.remove(file.split('.')[0] + "_without_silence.wav")
-        return features
+        print(f"--> STARTING TRAINING FOR: {label_name}")
+        
+        count = 0
+        for file in files:
+            count += 1
+            if count % 10 == 0:
+                print(f"Processing {label_name} file {count}/{len(files)}")
+            
+            try:
+                vector = self.features_extractor.extract_features(file)
+                
+                # --- OPTIMIZATION START ---
+                # Take every 5th frame. Reduces data size by 80% but keeps the pattern.
+                vector = vector[::5] 
+                # --- OPTIMIZATION END ---
+                
+                if all_features.size == 0:
+                    all_features = vector
+                else:
+                    all_features = np.vstack((all_features, vector))
+            except Exception as e:
+                print(f"Error processing {file}: {e}")
+                continue
+
+        print(f"Total features shape for {label_name}: {all_features.shape}")
+
+        if all_features.size > 0:
+            print(f"Fitting GMM for {label_name} (this may still take a moment)...")
+            # Reduced n_iter from 100 to 20 for faster training
+            model_gmm = hmm.GaussianHMM(n_components=16, covariance_type='diag', n_iter=20)
+            model_gmm.fit(all_features)
+            return model_gmm
+        else:
+            print(f"No features extracted for {label_name}!")
+            return None
+
+    def process(self):
+        females, males = self.get_file_paths(self.females_training_path, self.males_training_path)
+        
+        # 1. Train Female Model
+        female_gmm = self.train_model_for_class(females, "female")
+        if female_gmm:
+            self.save_gmm(female_gmm, "females")
+            
+        # 2. Train Male Model
+        male_gmm = self.train_model_for_class(males, "male")
+        if male_gmm:
+            self.save_gmm(male_gmm, "males")
 
     def save_gmm(self, gmm, name):
-        """ Save Gaussian mixture model using pickle.
-
-            Args:
-                gmm        : Gaussian mixture model.
-                name (str) : File name.
-        """
-        import os
-        path     = os.path.dirname(__file__)
-        filename = path + "/" + name + ".hmm"
+        """ Save the actual GMM object """
+        # Create a 'models' directory if it doesn't exist to keep things clean
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        models_path = os.path.join(base_path, "models")
+        if not os.path.exists(models_path):
+            os.makedirs(models_path)
+            
+        filename = os.path.join(models_path, name + ".nn")
+        
         with open(filename, 'wb') as gmm_file:
             pickle.dump(gmm, gmm_file)
-        print ("%5s %10s" % ("SAVING", filename,))
-
+        print(f"SAVED MODEL: {filename}")
 
 if __name__== "__main__":
-    models_trainer = ModelsTrainer("TrainingData/females", "TrainingData/males")
-    models_trainer.process()
+    # Ensure paths are correct relative to where you run the script
+    trainer = ModelsTrainer("TrainingData/females", "TrainingData/males")
+    trainer.process()
